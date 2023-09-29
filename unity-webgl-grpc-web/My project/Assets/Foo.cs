@@ -17,111 +17,54 @@ using UnityEngine;
 using UnityEngine.Networking;
 using Ping = Momento.Protos.CachePing.Ping;
 
-class Handler : HttpMessageHandler
-{
-    private readonly MonoBehaviour unityEnvironment;
-    public Handler(MonoBehaviour unityEnvironment)
-    {
-        this.unityEnvironment = unityEnvironment;
-    }
-
-    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-    {
-        // request.Method
-        switch (request.Method)
-        {
-            case HttpMethod m when m == HttpMethod.Post:
-            var raw = await request.Content.ReadAsByteArrayAsync();
-            Debug.Log("headers: " + request.Headers);
-            Debug.Log("properties: " + request.Properties.Keys);
-            Debug.Log("properties: " + request.Properties.Values);
-            var uploadHandler = new UploadHandlerRaw(raw)
-            {
-                contentType = request.Content.Headers.GetValues("Content-Type").FirstOrDefault(),
-            };
-
-            var urequest = new UnityWebRequest(request.RequestUri)
-            {
-                method = "POST",
-                uploadHandler = uploadHandler,
-                timeout = 1,
-            };
-
-            foreach (var header in request.Headers)
-            {
-                Debug.Log("Header: " + header.Key + ": " + string.Join(',', header.Value));
-                urequest.SetRequestHeader(header.Key, string.Join(',', header.Value));
-            }
-
-            Debug.Log("sending " + urequest.ToString() + " to " + urequest.uri + " using " + urequest.method + " for data " + Encoding.UTF8.GetString(raw));
-            var completion = new TaskCompletionSource<HttpResponseMessage>();
-            unityEnvironment.StartCoroutine(CompleteHttpRequestViaCoroutine(urequest, completion));
-
-            var theResult = await completion.Task; // This seems to go out to lunch.
-            Debug.Log("got a response: " + urequest.result.ToString());
-
-            if (urequest.result != UnityWebRequest.Result.Success)
-            {
-                throw new IOException("grpc always returns a 200 with a status. Something else broke.");
-            }
-            return new HttpResponseMessage((HttpStatusCode)urequest.responseCode);
-            default:
-            throw new IOException("I don't know how to do anything other than post at grpc servers");
-        }
-    }
-
-    private IEnumerator CompleteHttpRequestViaCoroutine(UnityWebRequest unityRequest, TaskCompletionSource<HttpResponseMessage> completion)
-    {
-        yield return unityRequest.SendWebRequest();
-        
-        var result = unityRequest.result;
-        
-        switch (result)
-        {
-            case UnityWebRequest.Result.Success:
-                var response = new HttpResponseMessage();
-                response.Content = new ByteArrayContent(unityRequest.downloadHandler.data);
-                completion.SetResult(response);
-                break;
-            default:
-                completion.SetException(new Exception($"Unexpected UnityWebRequest result: {result}"));
-                break;
-        }
-    }
-}
-
 public class Foo : MonoBehaviour
 {
+    private Task<_PingResponse> later;
+
     // Start is called before the first frame update
     void Start()
     {
-        Debug.Log($"Hello World: {Bar.bar()}");
-        Debug.Log("Constructing the new handler");
-        
-        Debug.Log("Constructed the things 2.");
-
-        var response = Ping();
-
-        Debug.Log($"Successful PING RESPONSE: {response}");
+        later = Ping();
     }
 
     // Update is called once per frame
     void Update()
     {
-        
+        if (later != null && later.Status != TaskStatus.Running)
+        {
+            Debug.Log(Thread.CurrentThread.ManagedThreadId + "task status: " + later.Status.ToString());
+            if (later.Status == TaskStatus.RanToCompletion)
+            {
+                if (later.IsCompleted) {
+                    if (later.Exception == null) {
+                        var response = later.Result;
+                        Debug.Log(Thread.CurrentThread.ManagedThreadId + $"Successful PING RESPONSE: {response}");
+                    } else {
+                        var response = later.Exception;
+                        Debug.Log(Thread.CurrentThread.ManagedThreadId + $"Error PING RESPONSE: {response}");
+                    }
+                }
+                later = null;
+            }
+        }
     }
 
-    _PingResponse Ping()
+    async Task<_PingResponse> Ping()
     {
+        Debug.Log(Thread.CurrentThread.ManagedThreadId + "creating channel");
         var channel = GrpcChannel.ForAddress(
             "https://cache.cell-alpha-dev.preprod.a.momentohq.com",
             new GrpcChannelOptions
             {
-                HttpHandler = new GrpcWebHandler(new Handler(this))
+                // HttpHandler = new GrpcWebHandler(new Handler(this))
+                HttpHandler = new GrpcWebHandler(new Momento.Http.UnityWebRequestHttpMessageHandler()) {
+                    GrpcWebMode = GrpcWebMode.GrpcWebText,
+                },
             });
         var pingClient = new Ping.PingClient(channel);
         var pingRequest = new _PingRequest();
 
-        return pingClient.Ping(pingRequest);
+        Debug.Log(Thread.CurrentThread.ManagedThreadId + "sending PingAsync");
+        return await pingClient.PingAsync(pingRequest).ConfigureAwait(false);
     }
 }
